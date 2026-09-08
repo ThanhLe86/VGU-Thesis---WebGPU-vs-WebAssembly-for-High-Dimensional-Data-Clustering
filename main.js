@@ -1,8 +1,13 @@
 import { generateSyntheticData, initializeCentroids } from './generator.js';
+import initWasm, {run_wasm_assignment} from './pkg/edge_kmeans_benchmark.js'
 
 let dataset = null;
 let centroids = null;
 let currentN = 0, currentD = 0, currentK = 0;
+
+initWasm().then(() => {
+  document.getElementById('statusLog').innerText = "Wasm Initialized.";
+});
 
 const log = (msg) => { document.getElementById('statusLog').innerText = msg; };
 
@@ -65,6 +70,37 @@ document.getElementById('btnRunJS').addEventListener('click', () => {
   const row = `
     <tr>
       <td>Pure JavaScript</td>
+      <td>${currentN}</td>
+      <td>${currentD}</td>
+      <td>${currentK}</td>
+      <td>${duration}</td>
+    </tr>
+  `;
+  document.getElementById('resultsTable').insertAdjacentHTML('beforeend', row);
+});
+
+// Enable the Wasm button when data is generated
+document.getElementById('btnGenData').addEventListener('click', () => {
+  document.getElementById('btnRunWasm').disabled = false;
+});
+
+// Wasm Benchmark Runner
+document.getElementById('btnRunWasm').addEventListener('click', () => {
+  log('Running WebAssembly assignment baseline...');
+  
+  // Warmup run
+  run_wasm_assignment(dataset, centroids, currentN, currentD, currentK);
+
+  const t0 = performance.now();
+  const assignments = run_wasm_assignment(dataset, centroids, currentN, currentD, currentK);
+  const t1 = performance.now();
+  const duration = (t1 - t0).toFixed(2);
+
+  log(`Wasm execution completed in ${duration} ms.`);
+
+  const row = `
+    <tr>
+      <td>WebAssembly (Baseline)</td>
       <td>${currentN}</td>
       <td>${currentD}</td>
       <td>${currentK}</td>
