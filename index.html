@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Edge Compute Benchmark: Wasm vs WebGPU</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #eee; }
+    button { padding: 8px 16px; margin: 4px; font-family: inherit; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+    th, td { border: 1px solid #444; padding: 8px; text-align: left; }
+    th { background: #2a2a2a; }
+    .status { color: #88ff88; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h2>Edge K-Means Benchmarking Suite</h2>
+  
+  <div>
+    <label>Points (N): <input id="numPoints" type="number" value="10000" step="5000" /></label>
+    <label>Dimensions (D): <input id="numDims" type="number" value="32" step="8" /></label>
+    <label>Clusters (K): <input id="numClusters" type="number" value="5" /></label>
+    <br><br>
+    <button id="btnGenData">1. Generate Synthetic Data</button>
+    <button id="btnRunJS" disabled>2. Run Baseline (Pure JS)</button>
+  </div>
+
+  <div class="status" id="statusLog">Ready.</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Engine</th>
+        <th>Points (N)</th>
+        <th>Dims (D)</th>
+        <th>Clusters (K)</th>
+        <th>Exec Time (ms)</th>
+      </tr>
+    </thead>
+    <tbody id="resultsTable"></tbody>
+  </table>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

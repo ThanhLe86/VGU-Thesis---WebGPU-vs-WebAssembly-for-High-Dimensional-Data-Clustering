@@ -1,0 +1,21 @@
+{
+  "name": "vgu-thesis---webgpu-vs.-webassembly-for-high-dimensional-data-clustering",
+  "version": "1.0.0",
+  "description": "Welcome to my PR for VGU Thesis -",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThanhLe86/VGU-Thesis---WebGPU-vs.-WebAssembly-for-High-Dimensional-Data-Clustering.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/ThanhLe86/VGU-Thesis---WebGPU-vs.-WebAssembly-for-High-Dimensional-Data-Clustering/issues"
+  },
+  "homepage": "https://github.com/ThanhLe86/VGU-Thesis---WebGPU-vs.-WebAssembly-for-High-Dimensional-Data-Clustering#readme"
+}
