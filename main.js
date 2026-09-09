@@ -2,6 +2,7 @@ import { generateSyntheticData, initializeCentroids } from './generator.js';
 import initWasm, {run_wasm_assignment} from './pkg/edge_kmeans_benchmark.js'
 
 let dataset = null;
+let datasetSab = null;
 let centroids = null;
 let currentN = 0, currentD = 0, currentK = 0;
 
@@ -20,7 +21,9 @@ document.getElementById('btnGenData').addEventListener('click', () => {
   log(`Generating ${currentN} points across ${currentD} dimensions...`);
   
   const t0 = performance.now();
-  dataset = generateSyntheticData(currentN, currentD);
+  const generated = generateSyntheticData(currentN, currentD);
+  dataset = generated.data;
+  datasetSab = generated.sab;
   centroids = initializeCentroids(dataset, currentN, currentD, currentK);
   const t1 = performance.now();
 
@@ -85,27 +88,53 @@ document.getElementById('btnGenData').addEventListener('click', () => {
 });
 
 // Wasm Benchmark Runner
-document.getElementById('btnRunWasm').addEventListener('click', () => {
-  log('Running WebAssembly assignment baseline...');
-  
-  // Warmup run
-  run_wasm_assignment(dataset, centroids, currentN, currentD, currentK);
-
+document.getElementById('btnRunWasm').addEventListener('click', async () => {
+  log('Running WebAssembly baseline...');
   const t0 = performance.now();
-  const assignments = run_wasm_assignment(dataset, centroids, currentN, currentD, currentK);
-  const t1 = performance.now();
-  const duration = (t1 - t0).toFixed(2);
-
-  log(`Wasm execution completed in ${duration} ms.`);
-
-  const row = `
-    <tr>
-      <td>WebAssembly (Baseline)</td>
-      <td>${currentN}</td>
-      <td>${currentD}</td>
-      <td>${currentK}</td>
-      <td>${duration}</td>
-    </tr>
-  `;
-  document.getElementById('resultsTable').insertAdjacentHTML('beforeend', row);
+  
+  // Detect CPU cores (usually 8, 12, or 16)
+  const numCores = navigator.hardwareConcurrency || 4; 
+  const pointsPerWorker = Math.ceil(currentN / numCores);
+  
+  let completedWorkers = 0;
+  const finalAssignments = new Int32Array(currentN);
+  
+  for (let i = 0; i < numCores; i++) {
+    const startIdx = i * pointsPerWorker;
+    if (startIdx >= currentN) break; // Catch edge cases
+    
+    const sliceN = Math.min(pointsPerWorker, currentN - startIdx);
+    
+    const worker = new Worker('./auxilliator/worker.js', { type: 'module' });
+    
+    worker.onmessage = (e) => {
+      // Stitch the results back together
+      finalAssignments.set(e.data.assignments, e.data.startIdx);
+      completedWorkers++;
+      worker.terminate();
+      
+      if (completedWorkers === numCores) {
+        const t1 = performance.now();
+        const duration = (t1 - t0).toFixed(2);
+        log(`Wasm (${numCores} Threads) completed in ${duration} ms.`);
+        
+        const row = `<tr>
+          <td>Wasm (${numCores} Threads)</td>
+          <td>${currentN}</td><td>${currentD}</td><td>${currentK}</td>
+          <td>${duration}</td>
+        </tr>`;
+        document.getElementById('resultsTable').insertAdjacentHTML('beforeend', row);
+      }
+    };
+    
+    // Dispatch the job
+    worker.postMessage({
+      sab: datasetSab,
+      centroids: centroids,
+      sliceN: sliceN,
+      d: currentD,
+      k: currentK,
+      startIdx: startIdx
+    });
+  }
 });

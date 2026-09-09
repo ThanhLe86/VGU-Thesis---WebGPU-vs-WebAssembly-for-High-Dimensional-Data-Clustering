@@ -4,12 +4,13 @@
  */
 export function generateSyntheticData(N, D) {
   const totalElements = N * D;
-  const data = new Float32Array(totalElements);
+  const buffer = new SharedArrayBuffer(totalElements * 4); 
+  const data = new Float32Array(buffer);
   
   for (let i = 0; i < totalElements; i++) {
     data[i] = Math.random();
   }
-  return data;
+  return { data, sab: buffer };
 }
 
 export function initializeCentroids(data, N, D, K) {
