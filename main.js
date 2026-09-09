@@ -138,3 +138,17 @@ document.getElementById('btnRunWasm').addEventListener('click', async () => {
     });
   }
 });
+
+document.getElementById('btnClearData').addEventListener('click', () => {
+  dataset = null;
+  datasetSab = null;
+  centroids = null;
+  document.getElementById('btnRunJS').disabled = true;
+  document.getElementById('btnRunWasm').disabled = true;
+  if (typeof window.gc === 'function') {
+    window.gc();
+    log('Memory references cleared and Garbage Collection forced.');
+  } else {
+    log('References cleared. (Launch browser with --js-flags="--expose-gc" to force hard GC).');
+  }
+});
