@@ -32,3 +32,19 @@ export function initializeCentroids(data, N, D, K) {
   }
   return centroids;
 }
+
+export function initializeCentroidsRandom(D, K) {
+  const centroids = new Float32Array(K * D);
+  for (let i = 0; i < centroids.length; i++) {
+    centroids[i] = Math.random();
+  }
+  return centroids;
+}
+
+export function generateBatch(batchSize, D) {
+  const data = new Float32Array(batchSize * D);
+  for (let i = 0; i < data.length; i++) {
+    data[i] = Math.random();
+  }
+  return data;
+}

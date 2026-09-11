@@ -1,37 +1,21 @@
-import { generateSyntheticData, initializeCentroids } from './generator.js';
 import initWasm, {run_wasm_assignment} from './pkg/edge_kmeans_benchmark.js'
-
-let dataset = null;
-let datasetSab = null;
-let centroids = null;
-let currentN = 0, currentD = 0, currentK = 0;
+import { initializeCentroidsRandom, generateBatch, generateSyntheticData } from './generator.js';
 
 initWasm().then(() => {
   document.getElementById('statusLog').innerText = "Wasm Initialized.";
+  document.getElementById('btnRunWasm').disabled = false;
+  document.getElementById('btnRunWasmMT').disabled = false;
 });
 
 const log = (msg) => { document.getElementById('statusLog').innerText = msg; };
 
-// 1. Data Generation Handler
-document.getElementById('btnGenData').addEventListener('click', () => {
-  currentN = parseInt(document.getElementById('numPoints').value, 10);
-  currentD = parseInt(document.getElementById('numDims').value, 10);
-  currentK = parseInt(document.getElementById('numClusters').value, 10);
+function processSliceOnWorker(worker, payload) {
+  return new Promise(resolve => {
+    worker.onmessage = (e) => resolve(e.data);
+    worker.postMessage(payload);
+  });
+}
 
-  log(`Generating ${currentN} points across ${currentD} dimensions...`);
-  
-  const t0 = performance.now();
-  const generated = generateSyntheticData(currentN, currentD);
-  dataset = generated.data;
-  datasetSab = generated.sab;
-  centroids = initializeCentroids(dataset, currentN, currentD, currentK);
-  const t1 = performance.now();
-
-  log(`Data generated in ${(t1 - t0).toFixed(2)} ms. Ready to benchmark.`);
-  document.getElementById('btnRunJS').disabled = false;
-});
-
-// 2. Pure JavaScript K-Means (Euclidean Distance Assignment)
 function runJSAssignment(data, centroids, N, D, K) {
   const assignments = new Int32Array(N);
 
@@ -59,96 +43,180 @@ function runJSAssignment(data, centroids, N, D, K) {
   return assignments;
 }
 
-document.getElementById('btnRunJS').addEventListener('click', () => {
-  log('Running JavaScript assignment baseline...');
-  runJSAssignment(dataset, centroids, currentN, currentD, currentK);
+function updateCentroids(batch, assignments, centroids, batchSize, D, clusterCounts) {
+  for (let i = 0; i < batchSize; i++) {
+    const cluster = assignments[i];
+    clusterCounts[cluster]++;
+    
+    const learningRate = 1.0 / clusterCounts[cluster];
+    const pointOffset = i * D;
+    const centroidOffset = cluster * D;
 
-  const t0 = performance.now();
-  const assignments = runJSAssignment(dataset, centroids, currentN, currentD, currentK);
-  const t1 = performance.now();
-  const duration = (t1 - t0).toFixed(2);
+    for (let d = 0; d < D; d++) {
+      const pointVal = batch[pointOffset + d];
+      centroids[centroidOffset + d] += learningRate * (pointVal - centroids[centroidOffset + d]);
+    }
+  }
+}
 
-  log(`JS execution completed in ${duration} ms.`);
+document.getElementById('btnRunJS').addEventListener('click', async () => {
+  const totalPoints = parseInt(document.getElementById('numPoints').value, 10);
+  const D = parseInt(document.getElementById('numDims').value, 10);
+  const K = parseInt(document.getElementById('numClusters').value, 10);
+  const batchSize = 10000;
+  const iterations = Math.ceil(totalPoints / batchSize);
+  
+  log(`Starting Pure JS Mini-Batch streaming for ${totalPoints} points...`);
+  
+  let streamingCentroids = initializeCentroidsRandom(D, K);
+  const clusterCounts = new Int32Array(K);
+  let totalComputeMs = 0;
+
+  for (let iter = 0; iter < iterations; iter++) {
+    const batch = generateBatch(batchSize, D);
+    
+    const t0 = performance.now();
+    const assignments = runJSAssignment(batch, streamingCentroids, batchSize, D, K);
+    updateCentroids(batch, assignments, streamingCentroids, batchSize, D, clusterCounts);
+    totalComputeMs += performance.now() - t0;
+    
+    if (iter % 100 === 0 && iter > 0) {
+      log(`JS Processed ${iter * batchSize} / ${totalPoints} points...`);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+
+  const duration = totalComputeMs.toFixed(2);
+  log(`JS Mini-Batch streaming completed in ${duration} ms.`);
 
   const row = `
     <tr>
-      <td>Pure JavaScript</td>
-      <td>${currentN}</td>
-      <td>${currentD}</td>
-      <td>${currentK}</td>
+      <td>Pure JavaScript (Mini-Batch)</td>
+      <td>${totalPoints}</td>
+      <td>${batchSize}</td>
+      <td>${D}</td>
+      <td>${K}</td>
       <td>${duration}</td>
     </tr>
   `;
   document.getElementById('resultsTable').insertAdjacentHTML('beforeend', row);
 });
 
-// Enable the Wasm button when data is generated
-document.getElementById('btnGenData').addEventListener('click', () => {
-  document.getElementById('btnRunWasm').disabled = false;
-});
-
-// Wasm Benchmark Runner
 document.getElementById('btnRunWasm').addEventListener('click', async () => {
-  log('Running WebAssembly baseline...');
-  const t0 = performance.now();
+  const totalPoints = parseInt(document.getElementById('numPoints').value, 10);
+  const D = parseInt(document.getElementById('numDims').value, 10);
+  const K = parseInt(document.getElementById('numClusters').value, 10);
+  const batchSize = 10000;
+  const iterations = Math.ceil(totalPoints / batchSize);
   
-  // Detect CPU cores (usually 8, 12, or 16)
-  const numCores = navigator.hardwareConcurrency || 4; 
-  const pointsPerWorker = Math.ceil(currentN / numCores);
+  log(`Starting Wasm Mini-Batch streaming for ${totalPoints} points...`);
   
-  let completedWorkers = 0;
-  const finalAssignments = new Int32Array(currentN);
-  
-  for (let i = 0; i < numCores; i++) {
-    const startIdx = i * pointsPerWorker;
-    if (startIdx >= currentN) break; // Catch edge cases
+  let streamingCentroids = initializeCentroidsRandom(D, K);
+  const clusterCounts = new Int32Array(K);
+  let totalComputeMs = 0;
+
+  for (let iter = 0; iter < iterations; iter++) {
+    const batch = generateBatch(batchSize, D);
     
-    const sliceN = Math.min(pointsPerWorker, currentN - startIdx);
+    const t0 = performance.now();
+    const assignments = run_wasm_assignment(batch, streamingCentroids, batchSize, D, K);
+    updateCentroids(batch, assignments, streamingCentroids, batchSize, D, clusterCounts);
+    totalComputeMs += performance.now() - t0;
     
-    const worker = new Worker('./auxilliator/worker.js', { type: 'module' });
-    
-    worker.onmessage = (e) => {
-      // Stitch the results back together
-      finalAssignments.set(e.data.assignments, e.data.startIdx);
-      completedWorkers++;
-      worker.terminate();
-      
-      if (completedWorkers === numCores) {
-        const t1 = performance.now();
-        const duration = (t1 - t0).toFixed(2);
-        log(`Wasm (${numCores} Threads) completed in ${duration} ms.`);
-        
-        const row = `<tr>
-          <td>Wasm (${numCores} Threads)</td>
-          <td>${currentN}</td><td>${currentD}</td><td>${currentK}</td>
-          <td>${duration}</td>
-        </tr>`;
-        document.getElementById('resultsTable').insertAdjacentHTML('beforeend', row);
-      }
-    };
-    
-    // Dispatch the job
-    worker.postMessage({
-      sab: datasetSab,
-      centroids: centroids,
-      sliceN: sliceN,
-      d: currentD,
-      k: currentK,
-      startIdx: startIdx
-    });
+    if (iter % 100 === 0 && iter > 0) {
+      log(`Wasm Processed ${iter * batchSize} / ${totalPoints} points...`);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
   }
+
+  const duration = totalComputeMs.toFixed(2);
+  log(`Wasm Mini-Batch streaming completed in ${duration} ms.`);
+
+  const row = `
+    <tr>
+      <td>WebAssembly (Mini-Batch)</td>
+      <td>${totalPoints}</td>
+      <td>${batchSize}</td>
+      <td>${D}</td>
+      <td>${K}</td>
+      <td>${duration}</td>
+    </tr>
+  `;
+  document.getElementById('resultsTable').insertAdjacentHTML('beforeend', row);
 });
 
-document.getElementById('btnClearData').addEventListener('click', () => {
-  dataset = null;
-  datasetSab = null;
-  centroids = null;
-  document.getElementById('btnRunJS').disabled = true;
-  document.getElementById('btnRunWasm').disabled = true;
-  if (typeof window.gc === 'function') {
-    window.gc();
-    log('Memory references cleared and Garbage Collection forced.');
-  } else {
-    log('References cleared. (Launch browser with --js-flags="--expose-gc" to force hard GC).');
+document.getElementById('btnRunWasmMT').addEventListener('click', async () => {
+  const totalPoints = parseInt(document.getElementById('numPoints').value, 10);
+  const D = parseInt(document.getElementById('numDims').value, 10);
+  const K = parseInt(document.getElementById('numClusters').value, 10);
+  
+  // MT needs larger batches to overcome thread communication overhead
+  const batchSize = 100000; 
+  const iterations = Math.ceil(totalPoints / batchSize);
+  
+  log(`Starting Wasm Multi-Threaded streaming for ${totalPoints} points...`);
+  
+  // 1. Initialize Persistent Worker Pool
+  const numCores = navigator.hardwareConcurrency || 4;
+  const workers = Array.from({ length: numCores }, () => new Worker('./auxilliator/worker_2.js', { type: 'module' }));
+  
+  let streamingCentroids = initializeCentroidsRandom(D, K);
+  const clusterCounts = new Int32Array(K);
+  let totalComputeMs = 0;
+
+  // 2. Stream Macro-Batches
+  for (let iter = 0; iter < iterations; iter++) {
+    const { data, sab } = generateSyntheticData(batchSize, D);
+    const pointsPerWorker = Math.ceil(batchSize / numCores);
+    const promises = [];
+    
+    const t0 = performance.now();
+
+    for (let i = 0; i < numCores; i++) {
+      const startIdx = i * pointsPerWorker;
+      if (startIdx >= batchSize) break;
+      const sliceN = Math.min(pointsPerWorker, batchSize - startIdx);
+      
+      promises.push(processSliceOnWorker(workers[i], {
+        sab: sab,
+        centroids: streamingCentroids,
+        sliceN: sliceN,
+        d: D,
+        k: K,
+        startIdx: startIdx
+      }));
+    }
+
+    const results = await Promise.all(promises);
+    
+    const batchAssignments = new Int32Array(batchSize);
+    for (const res of results) {
+      batchAssignments.set(res.assignments, res.startIdx);
+    }
+    
+    updateCentroids(data, batchAssignments, streamingCentroids, batchSize, D, clusterCounts);
+    totalComputeMs += performance.now() - t0;
+
+    if (iter % 10 === 0 && iter > 0) {
+      log(`MT Wasm Processed ${iter * batchSize} / ${totalPoints} points...`);
+    }
   }
+
+  // 3. Cleanup threads to free RAM
+  workers.forEach(w => w.terminate());
+
+  const duration = totalComputeMs.toFixed(2);
+  log(`Multi-Threaded Wasm completed in ${duration} ms.`);
+
+  const row = `
+    <tr>
+      <td>Wasm (Multi-Thread Mini-Batch)</td>
+      <td>${totalPoints}</td>
+      <td>${batchSize}</td>
+      <td>${D}</td>
+      <td>${K}</td>
+      <td>${duration}</td>
+    </tr>
+  `;
+  document.getElementById('resultsTable').insertAdjacentHTML('beforeend', row);
 });

@@ -20,10 +20,9 @@
     <label>Dimensions (D): <input id="numDims" type="number" value="32" step="8" /></label>
     <label>Clusters (K): <input id="numClusters" type="number" value="5" /></label>
     <br><br>
-    <button id="btnGenData">1. Generate Synthetic Data</button>
-    <button id="btnClearData">4. Clear Memory & Reset</button>
-    <button id="btnRunJS" disabled>2. Run Baseline (Pure JS)</button>
+    <button id="btnRunJS">2. Run Baseline (Pure JS)</button>
     <button id="btnRunWasm" disabled>3. Run Baseline (WebAssembly)</button>
+    <button id="btnRunWasmMT" disabled>3. Run Multi-Threaded WebAssembly</button>
   </div>
 
   <div class="status" id="statusLog">Ready.</div>
