@@ -6,44 +6,73 @@ A browser-based empirical benchmarking suite comparing the performance character
 
 ## 1. Project Overview & Research Context
 
-High-dimensional data analysis in web environments has traditionally relied on either server-side cloud offloading or client-side interpreted runtimes (e.g., Pyodide/Python runtimes), both of which incur significant latency overheads.
+High-dimensional data analysis in web environments has traditionally relied on either server-side cloud offloading or interpreted runtimes, both of which incur substantial latency and memory overheads.
 
-This research investigates the performance tradeoffs of client-side edge computing by bypassing interpreted layers:
+This research investigates the performance tradeoffs of client-side execution by benchmarking:
 
-* **WebAssembly (Wasm):** Near-native compiled CPU execution utilizing sequential execution and SIMD (Single Instruction, Multiple Data) vectorization.
-* **WebGPU:** Massively parallel throughput via WGSL (WebGPU Shading Language) compute pipelines.
+* **WebAssembly (Wasm):** Single-threaded and multi-core CPU execution accelerated with SIMD128 vectorization.
+* **WebGPU:** Massively parallel execution via WGSL compute shaders.
 
 ### Core Research Objective
 
-Identify the **performance crossover point**—the threshold of dataset size ($N$) and dimensionality ($D$) where WebGPU's parallel throughput overcomes the latency penalty of system RAM-to-VRAM buffer copies.
+Identify the **performance crossover point**—the dataset size ($N$) and dimensionality ($D$) threshold where WebGPU's parallel throughput overcomes the latency penalty of system RAM-to-VRAM buffer copies.
 
 ---
 
 ## 2. Current Implementation Status
 
-* [x] **Benchmarking Test Harness:** Web UI with configurable parameters ($N, D, K$) and high-resolution timing via `performance.now()`.
-* [x] **Synthetic Data Engine:** Continuous flat `Float32Array` generator preserving cache locality and hardware buffer compatibility.
-* [x] **Baseline JavaScript Engine:** Single-threaded Euclidean distance assignment loop for comparative baseline.
-* [x] **WebAssembly Engine (Baseline):** Native-speed Rust kernel compiled to `wasm32-unknown-unknown` with `wasm-bindgen` bindings.
+* [x] **Benchmarking Test Harness:** Web interface with configurable $N, D, K$ parameters and high-resolution timing via `performance.now()`.
+* [x] **Streaming Mini-Batch Architecture:** $O(\text{batch\_size})$ constant memory footprint bypassing browser 32-bit linear address limits.
+* [x] **Cross-Origin Isolation Server:** Dedicated Node.js server injecting COOP/COEP headers to unlock `SharedArrayBuffer`.
+* [x] **Baseline JavaScript Engine:** Mini-Batch streaming Euclidean distance assignment loop.
+* [x] **Single-Threaded Wasm Engine:** Rust kernel compiled to `wasm32-unknown-unknown` via `wasm-bindgen`.
+
+
+* [x] **Multi-Threaded Wasm Engine:** Persistent Web Worker pool partitioning batch slices over zero-copy `SharedArrayBuffer` memory.
+* [x] **SIMD128 Auto-Vectorization:** Build flags enabled targeting 128-bit vector registers.
+* [ ] **WebGPU Compute Pipeline:** WGSL distance calculation kernel and buffer binding (Upcoming).
+
+---
+
+## 3. Architecture & Memory Management
+
+### The Streaming Mini-Batch Model
+
+Standard full-batch Lloyd's $K$-means requires allocating the entire dataset contiguously, hitting the 32-bit Wasm memory limit ($2.14\text{ GB}$) and triggering browser `RangeError` / OOM crashes at scale.
+
+This engine adopts a **Streaming Mini-Batch** architecture:
+
+* Batches are dynamically sampled, assigned to centroids, and used to iteratively update cluster centers.
+* Memory consumption remains constant ($<10\text{ MB}$) regardless of whether $N = 10^4$ or $N = 10^9$.
+* In multi-threaded mode, batches are mapped across a persistent pool of Web Workers via `SharedArrayBuffer` views, eliminating thread instantiation and message serialization overhead.
 
 ---
 
 ## 4. Prerequisites & Environment Setup
 
-The development environment is configured on **EndeavourOS (Arch Linux)** using stable Rust and Node.js.
+Configured on **EndeavourOS (Arch Linux)** using stable Rust and Node.js.
 
 ### System Packages
 
 ```bash
-sudo pacman -S base-devel rustup nodejs npm wasm-pack
+sudo pacman -S base-devel rustup nodejs npm wasm-pack wabt
 
 ```
 
-### Rust Toolchain & Wasm Target
+### Rust Toolchain & SIMD Configuration
 
 ```bash
 rustup default stable
 rustup target add wasm32-unknown-unknown
+
+```
+
+Ensure `.cargo/config.toml` includes:
+
+```toml
+[build]
+rustflags = ["-C", "target-feature=+simd128"]
+
 ```
 
 ---
@@ -52,41 +81,25 @@ rustup target add wasm32-unknown-unknown
 
 ### 1. Compile the WebAssembly Module
 
-Compile the Rust kernel into web-ready ES6 modules:
-
 ```bash
 wasm-pack build --target web
 
 ```
 
-### 2. Serve the Harness
-
-Because WebAssembly requires fetch/streaming mechanics, serve the root directory over a local HTTP server:
+*Optional:* Verify SIMD instructions in the compiled binary:
 
 ```bash
-# Using Node's npx serve
-npx serve .
-
-# Or use the VS Code Live Server extension on index.html
+wasm2wat pkg/edge_kmeans_benchmark_bg.wasm | grep -E "v128|f32x4" | head -n 10
 
 ```
 
-Open your browser to `http://localhost:3000` (or the port specified by your local server).
+### 2. Run the Cross-Origin Isolated Server
 
----
+`SharedArrayBuffer` requires strict cross-origin isolation policies:
 
-## 6. Known Architectural Constraints & Edge Cases
-
-### The 32-Bit WebAssembly Address Limit
-
-WebAssembly currently targets a 32-bit linear address space (`wasm32`).
-
-* The maximum indexable single allocation in Rust on `wasm32` is bounded by `isize::MAX` (**2,147,483,647 bytes / ~2.14 GB**).
-* Attempting to allocate datasets exceeding this limit (e.g., $N = 10,000,000$ points at $D = 64$, requiring $10,000,000 \times 64 \times 4 \text{ bytes} \approx 2.56 \text{ GB}$) results in an immediate out-of-memory (OOM) capacity overflow:
-```text
-panicked at library/alloc/src/raw_vec.rs: capacity overflow
+```bash
+node server.js
 
 ```
 
-
-* **Benchmarking Parameter Scope:** Empirical benchmarks for the single-threaded in-memory Wasm pipeline should maintain $N$ between $10,000$ and $500,000$ points to guarantee allocation stability inside the browser sandbox.
+Open `http://localhost:3000` in a Chromium-based browser.
