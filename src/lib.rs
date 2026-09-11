@@ -13,7 +13,6 @@ pub fn run_wasm_assignment(
     d: usize, 
     k: usize
 ) -> Vec<i32> {
-    // initializes the array with zeros
     let mut assignments = vec![0; n];
 
     for i in 0..n {

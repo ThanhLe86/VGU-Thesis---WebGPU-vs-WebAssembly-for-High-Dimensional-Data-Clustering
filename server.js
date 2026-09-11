@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 
 const PORT = 3000;
 
@@ -22,7 +23,6 @@ http.createServer((req, res) => {
             res.writeHead(404);
             res.end('File not found');
         } else {
-            // These two headers unlock SharedArrayBuffer in the browser
             res.writeHead(200, {
                 'Content-Type': contentType,
                 'Cross-Origin-Opener-Policy': 'same-origin',
@@ -32,5 +32,21 @@ http.createServer((req, res) => {
         }
     });
 }).listen(PORT, () => {
-    console.log(`Isolated server running at http://localhost:${PORT}/`);
+    const targetUrl = `http://localhost:${PORT}/`;
+    console.log(`Isolated server running at ${targetUrl}`);
+
+    const browserFlags = [
+        '--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE',
+        '--enable-unsafe-webgpu',
+        targetUrl
+    ];
+
+    // Spawns Chromium on the RTX 3060 via prime-run
+    const browser = spawn('prime-run', ['google-chrome-stable', ...browserFlags], {
+        detached: true,
+        stdio: 'ignore'
+    });
+
+    // Detaches child process so the terminal isn't tied to browser logging
+    browser.unref();
 });

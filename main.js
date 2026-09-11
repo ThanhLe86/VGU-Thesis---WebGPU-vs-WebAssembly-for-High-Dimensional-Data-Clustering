@@ -1,10 +1,31 @@
 import initWasm, {run_wasm_assignment} from './pkg/edge_kmeans_benchmark.js'
+import initWebGPU from "./auxilliator/wgslInitializer.js"
 import { initializeCentroidsRandom, generateBatch, generateSyntheticData } from './generator.js';
 
-initWasm().then(() => {
+let gpuDevice = null;
+let gpuPipeline = null;
+
+async function setupWebGPU() {
+  try {
+    const gpu = await initWebGPU();
+    gpuDevice = gpu.device;
+    gpuPipeline = gpu.pipeline;
+    
+    const btnWebGPU = document.getElementById('btnRunWebGPU');
+    if (btnWebGPU) btnWebGPU.disabled = false;
+    log("WebGPU Initialized.");
+  } catch (err) {
+    log(`WebGPU initialization failed: ${err.message}`);
+  }
+}
+
+// Call inside your initial startup chain
+initWasm().then(async () => {
   document.getElementById('statusLog').innerText = "Wasm Initialized.";
   document.getElementById('btnRunWasm').disabled = false;
   document.getElementById('btnRunWasmMT').disabled = false;
+  
+  await setupWebGPU();
 });
 
 const log = (msg) => { document.getElementById('statusLog').innerText = msg; };
@@ -134,9 +155,8 @@ document.getElementById('btnRunWasm').addEventListener('click', async () => {
 
   const row = `
     <tr>
-      <td>WebAssembly (Mini-Batch)</td>
+      <td>WebAssembly</td>
       <td>${totalPoints}</td>
-      <td>${batchSize}</td>
       <td>${D}</td>
       <td>${K}</td>
       <td>${duration}</td>
@@ -151,7 +171,7 @@ document.getElementById('btnRunWasmMT').addEventListener('click', async () => {
   const K = parseInt(document.getElementById('numClusters').value, 10);
   
   // MT needs larger batches to overcome thread communication overhead
-  const batchSize = 100000; 
+  const batchSize = 100000;
   const iterations = Math.ceil(totalPoints / batchSize);
   
   log(`Starting Wasm Multi-Threaded streaming for ${totalPoints} points...`);
@@ -212,11 +232,125 @@ document.getElementById('btnRunWasmMT').addEventListener('click', async () => {
     <tr>
       <td>Wasm (Multi-Thread Mini-Batch)</td>
       <td>${totalPoints}</td>
-      <td>${batchSize}</td>
       <td>${D}</td>
       <td>${K}</td>
       <td>${duration}</td>
     </tr>
   `;
   document.getElementById('resultsTable').insertAdjacentHTML('beforeend', row);
+});
+
+document.getElementById('btnRunWebGPU').addEventListener('click', async () => {
+  if (!gpuDevice) {
+    await setupWebGPU();
+  }
+
+  const totalPoints = parseInt(document.getElementById('numPoints').value, 10);
+  const D = parseInt(document.getElementById('numDims').value, 10);
+  const K = parseInt(document.getElementById('numClusters').value, 10);
+
+  const batchSize = 100000;
+  const iterations = Math.ceil(totalPoints / batchSize);
+  
+  log(`Starting WebGPU streaming for ${totalPoints} points...`);
+  
+  let streamingCentroids = initializeCentroidsRandom(D, K);
+  const clusterCounts = new Int32Array(K);
+  let totalComputeMs = 0;
+
+  // 1. Allocate GPU VRAM buffers
+  const uniformBuffer = gpuDevice.createBuffer({
+    size: 8,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  gpuDevice.queue.writeBuffer(uniformBuffer, 0, new Uint32Array([D, K]));
+
+  const dataBuffer = gpuDevice.createBuffer({
+    size: batchSize * D * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+
+  const centroidBuffer = gpuDevice.createBuffer({
+    size: K * D * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+
+  const assignmentBuffer = gpuDevice.createBuffer({
+    size: batchSize * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+  });
+
+  const readBuffer = gpuDevice.createBuffer({
+    size: batchSize * 4,
+    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+  });
+
+  const bindGroup = gpuDevice.createBindGroup({
+    layout: gpuPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuffer } },
+      { binding: 1, resource: { buffer: dataBuffer } },
+      { binding: 2, resource: { buffer: centroidBuffer } },
+      { binding: 3, resource: { buffer: assignmentBuffer } },
+    ],
+  });
+
+  // 2. Execute streaming batches
+  for (let iter = 0; iter < iterations; iter++) {
+    const batch = generateBatch(batchSize, D);
+    
+    const t0 = performance.now();
+    
+    // 1. Host-to-Device Transfer (System RAM -> GPU VRAM)
+    gpuDevice.queue.writeBuffer(dataBuffer, 0, batch);
+    gpuDevice.queue.writeBuffer(centroidBuffer, 0, streamingCentroids);
+
+    // 2. Encode Compute Pass
+    const encoder = gpuDevice.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(gpuPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.ceil(batchSize / 64)); 
+    pass.end();
+
+    // 3. Stage Device-to-Host Copy
+    encoder.copyBufferToBuffer(assignmentBuffer, 0, readBuffer, 0, batchSize * 4);
+    gpuDevice.queue.submit([encoder.finish()]);
+
+    // 4. Await GPU Execution and Map VRAM back to CPU RAM
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const assignments = new Int32Array(readBuffer.getMappedRange());
+    
+    // 5. Host-side Centroid Update (executed before unmapping the buffer view)
+    updateCentroids(batch, assignments, streamingCentroids, batchSize, D, clusterCounts);
+    readBuffer.unmap();
+    
+    totalComputeMs += performance.now() - t0;
+    
+    if (iter % 10 === 0 && iter > 0) {
+      log(`WebGPU Processed ${iter * batchSize} / ${totalPoints} points...`);
+    }
+  }
+
+  const duration = totalComputeMs.toFixed(2);
+  log(`WebGPU streaming completed in ${duration} ms.`);
+
+  // 3. Render metrics to the results table
+  const row = `
+    <tr>
+      <td>WebGPU processing</td>
+      <td>${totalPoints}</td>
+      <td>${batchSize}</td>
+      <td>${D}</td>
+      <td>${duration}</td>
+    </tr>
+  `;
+  document.getElementById('resultsTable').insertAdjacentHTML('beforeend', row);
+
+  // 4. Free GPU VRAM allocations to avoid memory leakage between runs
+  uniformBuffer.destroy();
+  dataBuffer.destroy();
+  centroidBuffer.destroy();
+  assignmentBuffer.destroy();
+  readBuffer.destroy();
 });
