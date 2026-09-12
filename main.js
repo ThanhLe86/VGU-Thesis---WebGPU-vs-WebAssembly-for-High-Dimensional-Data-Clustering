@@ -1,6 +1,6 @@
-import initWasm, {run_wasm_assignment} from './pkg/edge_kmeans_benchmark.js'
+import initWasm, {run_wasm_assignment, CentroidTracker} from './pkg/edge_kmeans_benchmark.js'
 import initWebGPU from "./auxilliator/wgslInitializer.js"
-import { initializeCentroidsRandom, generateBatch, generateSyntheticData } from './generator.js';
+import { initializeCentroidsRandom, generateBatch } from './generator.js';
 
 let gpuDevice = null;
 let gpuPipeline = null;
@@ -62,22 +62,6 @@ function runJSAssignment(data, centroids, N, D, K) {
     assignments[i] = bestCluster;
   }
   return assignments;
-}
-
-function updateCentroids(batch, assignments, centroids, batchSize, D, clusterCounts) {
-  for (let i = 0; i < batchSize; i++) {
-    const cluster = assignments[i];
-    clusterCounts[cluster]++;
-    
-    const learningRate = 1.0 / clusterCounts[cluster];
-    const pointOffset = i * D;
-    const centroidOffset = cluster * D;
-
-    for (let d = 0; d < D; d++) {
-      const pointVal = batch[pointOffset + d];
-      centroids[centroidOffset + d] += learningRate * (pointVal - centroids[centroidOffset + d]);
-    }
-  }
 }
 
 document.getElementById('btnRunJS').addEventListener('click', async () => {
@@ -169,36 +153,40 @@ document.getElementById('btnRunWasmMT').addEventListener('click', async () => {
   const totalPoints = parseInt(document.getElementById('numPoints').value, 10);
   const D = parseInt(document.getElementById('numDims').value, 10);
   const K = parseInt(document.getElementById('numClusters').value, 10);
-  
-  // MT needs larger batches to overcome thread communication overhead
-  const batchSize = 100000;
+
+  const batchSize = 1000000;
   const iterations = Math.ceil(totalPoints / batchSize);
-  
+
   log(`Starting Wasm Multi-Threaded streaming for ${totalPoints} points...`);
-  
-  // 1. Initialize Persistent Worker Pool
+
   const numCores = navigator.hardwareConcurrency || 4;
   const workers = Array.from({ length: numCores }, () => new Worker('./auxilliator/worker_2.js', { type: 'module' }));
-  
-  let streamingCentroids = initializeCentroidsRandom(D, K);
-  const clusterCounts = new Int32Array(K);
-  let totalComputeMs = 0;
 
-  // 2. Stream Macro-Batches
+  let streamingCentroids = initializeCentroidsRandom(D, K);
+  const tracker = new CentroidTracker(streamingCentroids, D, K);
+  
+  let totalComputeMs = 0;
+  const totalElements = batchSize * D;
+  const sharedBuffer = new SharedArrayBuffer(totalElements * 4);
+  const sharedDataView = new Float32Array(sharedBuffer);
+
   for (let iter = 0; iter < iterations; iter++) {
-    const { data, sab } = generateSyntheticData(batchSize, D);
+    for (let i = 0; i < totalElements; i++) {
+      sharedDataView[i] = Math.random();
+    }
+    
     const pointsPerWorker = Math.ceil(batchSize / numCores);
     const promises = [];
-    
+
     const t0 = performance.now();
 
     for (let i = 0; i < numCores; i++) {
       const startIdx = i * pointsPerWorker;
       if (startIdx >= batchSize) break;
       const sliceN = Math.min(pointsPerWorker, batchSize - startIdx);
-      
+
       promises.push(processSliceOnWorker(workers[i], {
-        sab: sab,
+        sab: sharedBuffer,
         centroids: streamingCentroids,
         sliceN: sliceN,
         d: D,
@@ -208,13 +196,15 @@ document.getElementById('btnRunWasmMT').addEventListener('click', async () => {
     }
 
     const results = await Promise.all(promises);
-    
+
     const batchAssignments = new Int32Array(batchSize);
     for (const res of results) {
       batchAssignments.set(res.assignments, res.startIdx);
     }
-    
-    updateCentroids(data, batchAssignments, streamingCentroids, batchSize, D, clusterCounts);
+
+    tracker.update(sharedDataView, batchAssignments, batchSize);
+    streamingCentroids = tracker.get_centroids();
+
     totalComputeMs += performance.now() - t0;
 
     if (iter % 10 === 0 && iter > 0) {
@@ -222,8 +212,8 @@ document.getElementById('btnRunWasmMT').addEventListener('click', async () => {
     }
   }
 
-  // 3. Cleanup threads to free RAM
   workers.forEach(w => w.terminate());
+  tracker.free();
 
   const duration = totalComputeMs.toFixed(2);
   log(`Multi-Threaded Wasm completed in ${duration} ms.`);
@@ -249,16 +239,15 @@ document.getElementById('btnRunWebGPU').addEventListener('click', async () => {
   const D = parseInt(document.getElementById('numDims').value, 10);
   const K = parseInt(document.getElementById('numClusters').value, 10);
 
-  const batchSize = 100000;
+  const batchSize = 1000000;
   const iterations = Math.ceil(totalPoints / batchSize);
   
   log(`Starting WebGPU streaming for ${totalPoints} points...`);
   
   let streamingCentroids = initializeCentroidsRandom(D, K);
-  const clusterCounts = new Int32Array(K);
+  const tracker = new CentroidTracker(streamingCentroids, D, K);
   let totalComputeMs = 0;
 
-  // 1. Allocate GPU VRAM buffers
   const uniformBuffer = gpuDevice.createBuffer({
     size: 8,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -295,13 +284,12 @@ document.getElementById('btnRunWebGPU').addEventListener('click', async () => {
     ],
   });
 
-  // 2. Execute streaming batches
   for (let iter = 0; iter < iterations; iter++) {
     const batch = generateBatch(batchSize, D);
     
     const t0 = performance.now();
     
-    // 1. Host-to-Device Transfer (System RAM -> GPU VRAM)
+    // 1. System RAM -> GPU VRAM
     gpuDevice.queue.writeBuffer(dataBuffer, 0, batch);
     gpuDevice.queue.writeBuffer(centroidBuffer, 0, streamingCentroids);
 
@@ -321,10 +309,9 @@ document.getElementById('btnRunWebGPU').addEventListener('click', async () => {
     await readBuffer.mapAsync(GPUMapMode.READ);
     const assignments = new Int32Array(readBuffer.getMappedRange());
     
-    // 5. Host-side Centroid Update (executed before unmapping the buffer view)
-    updateCentroids(batch, assignments, streamingCentroids, batchSize, D, clusterCounts);
+    tracker.update(batch, assignments, batchSize);
     readBuffer.unmap();
-    
+    streamingCentroids = tracker.get_centroids();
     totalComputeMs += performance.now() - t0;
     
     if (iter % 10 === 0 && iter > 0) {
@@ -335,7 +322,6 @@ document.getElementById('btnRunWebGPU').addEventListener('click', async () => {
   const duration = totalComputeMs.toFixed(2);
   log(`WebGPU streaming completed in ${duration} ms.`);
 
-  // 3. Render metrics to the results table
   const row = `
     <tr>
       <td>WebGPU processing</td>
@@ -346,8 +332,6 @@ document.getElementById('btnRunWebGPU').addEventListener('click', async () => {
     </tr>
   `;
   document.getElementById('resultsTable').insertAdjacentHTML('beforeend', row);
-
-  // 4. Free GPU VRAM allocations to avoid memory leakage between runs
   uniformBuffer.destroy();
   dataBuffer.destroy();
   centroidBuffer.destroy();

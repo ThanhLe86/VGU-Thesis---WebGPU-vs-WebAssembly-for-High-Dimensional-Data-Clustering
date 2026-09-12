@@ -1,3 +1,5 @@
+pub mod centroid_tracker;
+
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -39,16 +41,3 @@ pub fn run_wasm_assignment(
 
     assignments
 }
-
-// pub fn add(left: u64, right: u64) -> u64 {
-//     left + right
-// }
-// mod tests {
-//     use super::*;
-
-//     #[test]
-//     fn it_works() {
-//         let result = add(2, 2);
-//         assert_eq!(result, 4);
-//     }
-// }
