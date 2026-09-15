@@ -48,3 +48,8 @@ export function generateBatch(batchSize, D) {
   }
   return data;
 }
+
+export function calculateBatchSize(totalPoints, D, maxBytes = 1500 * 1024 * 1024) {
+  const maxPointsByMemory = Math.floor(maxBytes / (D * 4));
+  return Math.max(1, Math.min(totalPoints, maxPointsByMemory));
+}
