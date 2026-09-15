@@ -3,9 +3,12 @@ export default async function initWebGPU() {
     throw new Error("WebGPU not supported on this browser.");
   }
 
-  const adapter = await navigator.gpu.requestAdapter();
+  const adapter = await navigator.gpu.requestAdapter({
+    powerPreference: 'high-performance'
+  });
+
   if (!adapter) {
-    throw new Error("Failed to acquire GPU adapter.");
+    throw new Error("Failed to acquire GPU adapter. Hardware acceleration might be blocked or unavailable");
   }
   const device = await adapter.requestDevice();
 
